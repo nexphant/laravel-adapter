@@ -1,22 +1,22 @@
 {
-    "name": "nexph/laravel-adapter",
-    "description": "Laravel HTTP server adapter for the Nexph runtime.",
+    "name": "nexphant/laravel-adapter",
+    "description": "Laravel HTTP server adapter for the Nexphant runtime.",
     "type": "library",
     "license": "MIT",
     "require": {
         "php": "^8.3",
-        "nexph/server": "^0.0",
+        "nexphant/server": "^0.0",
         "laravel/framework": "^13.0"
     },
     "autoload": {
         "psr-4": {
-            "Nexph\\LaravelAdapter\\": "src/"
+            "Nexphant\\LaravelAdapter\\": "src/"
         }
     },
     "extra": {
         "laravel": {
             "providers": [
-                "Nexph\\LaravelAdapter\\NexphServiceProvider"
+                "Nexphant\\LaravelAdapter\\NexphantServiceProvider"
             ]
         }
     },

@@ -1,11 +1,11 @@
-# Laravel Adapter for Nexph
+# Laravel Adapter for Nexphant
 
-Laravel HTTP server adapter for the Nexph runtime.
+Laravel HTTP server adapter for the Nexphant runtime.
 
 ## Installation
 
 ```bash
-composer require nexph/laravel-adapter
+composer require nexphant/laravel-adapter
 ```
 
 ## Usage

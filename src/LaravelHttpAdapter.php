@@ -1,6 +1,6 @@
 <?php
 
-namespace Nexph\LaravelAdapter;
+namespace Nexphant\LaravelAdapter;
 
 use Illuminate\Contracts\Foundation\Application as LaravelApplication;
 use Illuminate\Contracts\Http\Kernel;
@@ -34,18 +34,18 @@ final class LaravelHttpAdapter
         return new self($laravel);
     }
 
-    public function handle(ServerRequest $nexphRequest, ServerResponse $nexphResponse): ServerResponse
+    public function handle(ServerRequest $nexphantRequest, ServerResponse $nexphantResponse): ServerResponse
     {
-        $symfonyRequest = $this->toSymfonyRequest($nexphRequest);
+        $symfonyRequest = $this->toSymfonyRequest($nexphantRequest);
         $symfonyResponse = null;
 
         try {
             $symfonyResponse = $this->kernel->handle($symfonyRequest);
             $symfonyResponse->prepare($symfonyRequest);
 
-            $this->toNexphResponse($symfonyResponse, $nexphResponse);
+            $this->toNexphantResponse($symfonyResponse, $nexphantResponse);
 
-            return $nexphResponse;
+            return $nexphantResponse;
         } finally {
             if ($symfonyResponse instanceof SymfonyResponse) {
                 $this->kernel->terminate($symfonyRequest, $symfonyResponse);
@@ -88,7 +88,7 @@ final class LaravelHttpAdapter
         return IlluminateRequest::createFromBase($symfonyRequest);
     }
 
-    private function toNexphResponse(SymfonyResponse $symfonyResponse, ServerResponse $nexphResponse): void
+    private function toNexphantResponse(SymfonyResponse $symfonyResponse, ServerResponse $nexphantResponse): void
     {
         $headers = [];
         foreach ($symfonyResponse->headers->allPreserveCaseWithoutCookies() as $name => $values) {
@@ -105,7 +105,7 @@ final class LaravelHttpAdapter
 
         unset($headers['Transfer-Encoding']);
 
-        $nexphResponse
+        $nexphantResponse
             ->status($symfonyResponse->getStatusCode())
             ->headers($headers)
             ->body($this->responseBody($symfonyResponse));
