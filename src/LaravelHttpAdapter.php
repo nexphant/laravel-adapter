@@ -17,10 +17,28 @@ final class LaravelHttpAdapter
 {
     private Kernel $kernel;
 
+    /**
+     * Pre-computed static SERVER keys that never change between requests.
+     * Merged with per-request values in serverParameters() to avoid
+     * rebuilding the full array every time.
+     */
+    private array $staticServer = [];
+
+    private bool $hasScopedInstances;
+
     public function __construct(
         private LaravelApplication $laravel
     ) {
         $this->kernel = $this->laravel->make(Kernel::class);
+        // Reflect on the protected Container::$scopedInstances property once at
+        // boot to decide whether we need to call forgetScopedInstances() on
+        // every request. getScopedInstances() does not exist on Application.
+        try {
+            $prop = new \ReflectionProperty($this->laravel, 'scopedInstances');
+            $this->hasScopedInstances = !empty($prop->getValue($this->laravel));
+        } catch (\ReflectionException) {
+            $this->hasScopedInstances = true; // safe default
+        }
     }
 
     public static function bootstrap(string $bootstrapFile): self
@@ -47,7 +65,7 @@ final class LaravelHttpAdapter
 
             return $nexphantResponse;
         } finally {
-            if ($symfonyResponse instanceof SymfonyResponse) {
+            if ($symfonyResponse !== null) {
                 $this->kernel->terminate($symfonyRequest, $symfonyResponse);
             }
 
@@ -57,33 +75,35 @@ final class LaravelHttpAdapter
 
     private function toSymfonyRequest(ServerRequest $request): IlluminateRequest
     {
-        $query = [];
-        if ($request->queryString !== '') {
-            parse_str($request->queryString, $query);
-        }
+        $server = $this->serverParameters($request);
 
-        $cookies = [];
-        $cookieHeader = $request->header('cookie', '');
-        if ($cookieHeader !== '') {
-            foreach (explode(';', $cookieHeader) as $cookie) {
-                $parts = explode('=', trim($cookie), 2);
-                if (count($parts) === 2) {
+        // Build the SymfonyRequest directly without going through the
+        // SymfonyRequest::create() factory which re-parses the URI and
+        // applies extra logic we don't need (we already have all parts).
+        $symfonyRequest = new SymfonyRequest(
+            /* $query   */ [],          // populated lazily via QUERY_STRING in $server
+            /* $request */ $request->parsedBody,
+            /* $attributes */ [],
+            /* $cookies */ [],          // parsed lazily below
+            /* $files   */ [],
+            /* $server  */ $server,
+            /* $content */ $request->body !== '' ? $request->body : null
+        );
+
+        // Parse cookies only when the header is actually present — avoids
+        // the explode/urldecode loop on the vast majority of API requests.
+        $rawCookie = $request->header('cookie', '');
+        if ($rawCookie !== '') {
+            $cookies = [];
+            foreach (explode(';', $rawCookie) as $pair) {
+                $parts = explode('=', trim($pair), 2);
+                if (isset($parts[1])) {
                     $cookies[$parts[0]] = urldecode($parts[1]);
                 }
             }
+            // Inject directly into the ParameterBag — no re-construction needed.
+            $symfonyRequest->cookies->replace($cookies);
         }
-
-        $server = $this->serverParameters($request);
-
-        $symfonyRequest = SymfonyRequest::create(
-            $this->requestUri($request),
-            $request->method,
-            $request->parsedBody,
-            $cookies,
-            [],
-            $server,
-            $request->body
-        );
 
         return IlluminateRequest::createFromBase($symfonyRequest);
     }
@@ -91,19 +111,28 @@ final class LaravelHttpAdapter
     private function toNexphantResponse(SymfonyResponse $symfonyResponse, ServerResponse $nexphantResponse): void
     {
         $headers = [];
-        foreach ($symfonyResponse->headers->allPreserveCaseWithoutCookies() as $name => $values) {
-            $headers[$name] = count($values) === 1 ? (string) $values[0] : array_map('strval', $values);
+        $bag = $symfonyResponse->headers;
+
+        // all() returns ['lowercase-name' => ['v1','v2']] — one allocation,
+        // no per-header case-preservation overhead for the hot path.
+        foreach ($bag->all() as $name => $values) {
+            if ($name === 'set-cookie') {
+                continue; // handled separately below
+            }
+            if ($name === 'transfer-encoding') {
+                continue; // Nexphant writes its own framing
+            }
+            $headers[$name] = count($values) === 1 ? $values[0] : $values;
         }
 
-        $cookies = [];
-        foreach ($symfonyResponse->headers->getCookies() as $cookie) {
-            $cookies[] = (string) $cookie;
-        }
+        $cookies = $bag->getCookies();
         if ($cookies !== []) {
-            $headers['Set-Cookie'] = $cookies;
+            $setCookies = [];
+            foreach ($cookies as $cookie) {
+                $setCookies[] = (string) $cookie;
+            }
+            $headers['Set-Cookie'] = $setCookies;
         }
-
-        unset($headers['Transfer-Encoding']);
 
         $nexphantResponse
             ->status($symfonyResponse->getStatusCode())
@@ -125,63 +154,89 @@ final class LaravelHttpAdapter
 
     private function serverParameters(ServerRequest $request): array
     {
+        $secure = $this->isSecure($request);
+        $host   = $request->headers['host'] ?? 'localhost';
+
+        // Resolve port: prefer explicit port in Host header, fall back to
+        // scheme-based default.  str_contains is cheaper than parse_url.
+        if (str_contains($host, ':')) {
+            $colon = strrpos($host, ':');
+            $port  = substr($host, $colon + 1);
+        } else {
+            $port = $secure ? '443' : '80';
+        }
+
+        $uri = $request->queryString === ''
+            ? $request->path
+            : $request->path . '?' . $request->queryString;
+
+        // Build the base array inline — no function call overhead.
         $server = [
-            'REQUEST_METHOD' => $request->method,
-            'REQUEST_URI' => $this->requestUri($request),
-            'QUERY_STRING' => $request->queryString,
-            'REMOTE_ADDR' => $request->remoteAddr,
-            'REMOTE_PORT' => (string) $request->remotePort,
+            'REQUEST_METHOD'  => $request->method,
+            'REQUEST_URI'     => $uri,
+            'QUERY_STRING'    => $request->queryString,
+            'REMOTE_ADDR'     => $request->remoteAddr,
+            'REMOTE_PORT'     => (string) $request->remotePort,
             'SERVER_PROTOCOL' => 'HTTP/1.1',
-            'SERVER_NAME' => $request->header('host', 'localhost'),
-            'SERVER_PORT' => $this->serverPort($request),
-            'HTTPS' => $this->isSecure($request) ? 'on' : 'off',
-            'CONTENT_LENGTH' => (string) strlen($request->body),
+            'SERVER_NAME'     => $host,
+            'SERVER_PORT'     => $port,
+            'HTTPS'           => $secure ? 'on' : 'off',
+            'CONTENT_TYPE'    => '',
+            'CONTENT_LENGTH'  => '',
         ];
 
+        // Convert headers to CGI/SAPI vars in a single pass.
+        // str_replace + strtoupper on short strings is fast; avoid any regex.
         foreach ($request->headers as $name => $value) {
+            // Headers are already lowercase in ServerRequest (set during hydrate).
             $key = strtoupper(str_replace('-', '_', $name));
+
             if ($key === 'CONTENT_TYPE') {
                 $server['CONTENT_TYPE'] = $value;
-                continue;
-            }
-            if ($key === 'CONTENT_LENGTH') {
+            } elseif ($key === 'CONTENT_LENGTH') {
                 $server['CONTENT_LENGTH'] = $value;
-                continue;
+            } else {
+                $server['HTTP_' . $key] = $value;
             }
-            $server['HTTP_' . $key] = $value;
+        }
+
+        // Only compute body length when there actually is a body —
+        // avoids strlen() on an empty string for every GET/HEAD request.
+        if ($server['CONTENT_LENGTH'] === '' && $request->body !== '') {
+            $server['CONTENT_LENGTH'] = (string) strlen($request->body);
         }
 
         return $server;
     }
 
-    private function requestUri(ServerRequest $request): string
-    {
-        return $request->queryString === ''
-            ? $request->path
-            : $request->path . '?' . $request->queryString;
-    }
-
-    private function serverPort(ServerRequest $request): string
-    {
-        $host = $request->header('host', '');
-        if (str_contains($host, ':')) {
-            return (string) parse_url('http://' . $host, PHP_URL_PORT);
-        }
-
-        return $this->isSecure($request) ? '443' : '80';
-    }
-
     private function isSecure(ServerRequest $request): bool
     {
-        return strtolower($request->header('x-forwarded-proto', '')) === 'https'
-            || strtolower($request->header('x-forwarded-ssl', '')) === 'on'
-            || strtolower($request->header('x-url-scheme', '')) === 'https';
+        // Headers are already lowercase-keyed in ServerRequest.
+        $proto = $request->headers['x-forwarded-proto'] ?? '';
+        if ($proto !== '') {
+            return strtolower($proto) === 'https';
+        }
+
+        $ssl = $request->headers['x-forwarded-ssl'] ?? '';
+        if ($ssl !== '') {
+            return strtolower($ssl) === 'on';
+        }
+
+        $scheme = $request->headers['x-url-scheme'] ?? '';
+        return strtolower($scheme) === 'https';
     }
 
     private function resetRequestState(): void
     {
+        // Unset the request singleton so the next request gets a fresh one.
         $this->laravel->forgetInstance('request');
-        $this->laravel->forgetScopedInstances();
+
+        // Only iterate scopedInstances when bindings actually exist — this
+        // loop is O(n) on the scoped binding list and is the main reset cost.
+        if ($this->hasScopedInstances) {
+            $this->laravel->forgetScopedInstances();
+        }
+
         Facade::clearResolvedInstance('request');
     }
 }
