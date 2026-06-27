@@ -6,8 +6,8 @@ use Illuminate\Contracts\Foundation\Application as LaravelApplication;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request as IlluminateRequest;
 use Illuminate\Support\Facades\Facade;
-use Nexph\Server\ServerRequest;
-use Nexph\Server\ServerResponse;
+use Nexphant\Server\ServerRequest;
+use Nexphant\Server\ServerResponse;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
@@ -110,7 +110,6 @@ final class LaravelHttpAdapter
 
     private function toNexphantResponse(SymfonyResponse $symfonyResponse, ServerResponse $nexphantResponse): void
     {
-        $headers = [];
         $bag = $symfonyResponse->headers;
 
         // all() returns ['lowercase-name' => ['v1','v2']] — one allocation,
@@ -122,21 +121,26 @@ final class LaravelHttpAdapter
             if ($name === 'transfer-encoding') {
                 continue; // Nexphant writes its own framing
             }
-            $headers[$name] = count($values) === 1 ? $values[0] : $values;
+            
+            // Handle array values by setting each one individually
+            if (is_array($values)) {
+                foreach ($values as $value) {
+                    $nexphantResponse->header($name, $value);
+                }
+            } else {
+                $nexphantResponse->header($name, $values);
+            }
         }
 
         $cookies = $bag->getCookies();
         if ($cookies !== []) {
-            $setCookies = [];
             foreach ($cookies as $cookie) {
-                $setCookies[] = (string) $cookie;
+                $nexphantResponse->header('Set-Cookie', (string) $cookie);
             }
-            $headers['Set-Cookie'] = $setCookies;
         }
 
         $nexphantResponse
             ->status($symfonyResponse->getStatusCode())
-            ->headers($headers)
             ->body($this->responseBody($symfonyResponse));
     }
 
