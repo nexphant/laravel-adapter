@@ -4,7 +4,7 @@ namespace Nexphant\LaravelAdapter\Console;
 
 use Illuminate\Console\Command;
 use Nexphant\LaravelAdapter\LaravelHttpAdapter;
-use Nexph\Server\HttpServer;
+use Nexphant\Server\HttpServer;
 
 class NexphantStartCommand extends Command
 {
